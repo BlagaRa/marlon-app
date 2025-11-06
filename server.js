@@ -2,9 +2,9 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 
 dotenv.config();
@@ -19,6 +19,7 @@ const PORT = process.env.PORT || 3000;
 const ONFIDO_API_TOKEN = process.env.ONFIDO_API_TOKEN;
 const ONFIDO_API_BASE = process.env.ONFIDO_API_BASE || "https://api.us.onfido.com";
 const ONFIDO_API_VERSION = "v3.6";
+const ONFIDO_WEBHOOK_SECRET = process.env.ONFIDO_WEBHOOK_SECRET || ""; // opțional
 
 if (!ONFIDO_API_TOKEN) {
   console.error("Lipsește ONFIDO_API_TOKEN în server/.env");
@@ -26,12 +27,15 @@ if (!ONFIDO_API_TOKEN) {
 }
 
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "2mb" })); // pentru toate rutele non-webhook
+
+// --- stocare in-memory pentru ultimele webhook-uri (opțional, util de debug / demo) ---
+const webhookStore = new Map(); // key: workflow_run_id, value: payload map + timestamp
 
 // Health
 app.get("/healthz", (_req, res) => res.send("ok"));
 
-// Helper Onfido
+// Helper fetch Onfido (Node 18+ are fetch nativ)
 async function onfidoFetch(pathname, opts = {}) {
   const url = `${ONFIDO_API_BASE}/${ONFIDO_API_VERSION}${pathname}`;
   const headers = {
@@ -135,6 +139,85 @@ app.get("/api/workflow_runs/:id", async (req, res) => {
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message, details: e.payload });
   }
+});
+
+/* =========================
+   WEBHOOK Onfido (opțional)
+   URL pt. Onfido: https://marlon-app-2.onrender.com/webhook/onfido
+   ========================= */
+
+// pentru verificare semnătură trebuie corpul brut, nu JSON parsat
+app.post(
+  "/webhook/onfido",
+  express.raw({ type: "application/json", limit: "2mb" }),
+  (req, res) => {
+    try {
+      const raw = req.body; // Buffer
+      const sigHeader = req.header("X-SHA2-Signature"); // header-ul Onfido
+      // Dacă ai pus ONFIDO_WEBHOOK_SECRET, verifică semnătura
+      if (ONFIDO_WEBHOOK_SECRET) {
+        if (!sigHeader) {
+          return res.status(400).send("missing signature");
+        }
+        const expected = crypto
+          .createHmac("sha256", ONFIDO_WEBHOOK_SECRET)
+          .update(raw)
+          .digest("hex");
+        if (expected !== sigHeader) {
+          return res.status(400).send("invalid signature");
+        }
+      }
+
+      // Parsează payload-ul
+      let payload = {};
+      try {
+        payload = JSON.parse(raw.toString("utf8"));
+      } catch {
+        return res.status(400).send("invalid json");
+      }
+
+      // Extrage ce te interesează din payload (după exemplul tău)
+      const resrc = payload?.payload?.resource || {};
+      const output = resrc?.output || {};
+      const runId =
+        resrc?.id ||
+        payload?.payload?.object?.id ||
+        payload?.object?.id ||
+        null;
+
+      const mapped = {
+        workflow_run_id: runId,
+        status: resrc?.status || payload?.payload?.object?.status || null,
+        first_name: null, // numele îl luăm de obicei din applicant API, aici nu vine
+        last_name: null,
+        gender: output?.gender ?? null,
+        date_of_birth: output?.dob ?? null,
+        document_type: output?.document_type ?? null,
+        document_number: output?.document_number ?? null,
+        date_expiry: output?.date_expiry ?? null,
+        applicant_id: resrc?.applicant_id || null,
+        received_at: new Date().toISOString(),
+      };
+
+      if (runId) {
+        webhookStore.set(runId, mapped);
+      }
+
+      // răspunde rapid 200 la Onfido
+      res.status(200).send("ok");
+    } catch (err) {
+      console.error("Webhook error:", err);
+      res.status(200).send("ok"); // Onfido recomandă 200 chiar și pe erori interne, ca să nu reîncerce agresiv
+    }
+  }
+);
+
+// endpoint mic de debug ca să vezi ce a ajuns prin webhook
+app.get("/api/webhook_runs/:id", (req, res) => {
+  const runId = req.params.id;
+  const data = webhookStore.get(runId);
+  if (!data) return res.status(404).json({ message: "not found" });
+  res.json(data);
 });
 
 /**
