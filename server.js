@@ -1,7 +1,5 @@
 import express from "express";
 import dotenv from "dotenv";
-
-// Node 18+ are fetch nativ
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -14,7 +12,6 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Onfido
 const ONFIDO_API_TOKEN = process.env.ONFIDO_API_TOKEN;
 const ONFIDO_API_BASE = process.env.ONFIDO_API_BASE || "https://api.us.onfido.com";
 const ONFIDO_API_VERSION = "v3.6";
@@ -24,28 +21,20 @@ if (!ONFIDO_API_TOKEN) {
   process.exit(1);
 }
 
-/* ============================
-   CORS pentru Netlify + .env
-   ============================ */
 const CORS_ORIGIN = (process.env.CORS_ORIGIN || "")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
 
-// Middleware CORS (înainte de orice JSON/body parser)
 app.use((req, res, next) => {
   const origin = req.headers.origin || "";
   let allow = false;
 
-  // permite *.netlify.app (prod + deploy previews)
   try {
     const host = new URL(origin).hostname;
     if (/\.netlify\.app$/i.test(host)) allow = true;
-  } catch {
-    // origin poate lipsi (ex: curl)
-  }
+  } catch {}
 
-  // permite origini explicite din .env
   if (!allow && CORS_ORIGIN.length) {
     if (CORS_ORIGIN.includes("*") || CORS_ORIGIN.includes(origin)) allow = true;
   }
@@ -56,26 +45,15 @@ app.use((req, res, next) => {
   }
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  // dacă folosești cookie-uri, deblochează credențialele:
-  // res.setHeader("Access-Control-Allow-Credentials", "true");
-
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
-/* ============================
-   Health
-   ============================ */
 app.get("/healthz", (_req, res) => res.send("ok"));
 
-/* ============================
-   WEBHOOK Onfido — fără secret
-   IMPORTANT: trebuie body RAW, deci îl punem
-   ÎNAINTE de express.json()
-   ============================ */
-const webhookStore = new Map(); // in-memory: runId -> payload esențial
+const webhookStore = new Map();
 
-app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "2mb" }), (req, res) => {
+app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
   try {
     const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body || ""), "utf8");
 
@@ -103,36 +81,37 @@ app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "2mb" }), (req, re
       document_type: output?.document_type ?? null,
       document_number: output?.document_number ?? null,
       date_expiry: output?.date_expiry ?? null,
+      full_name: output?.full_name ?? null,
+      address: output?.address ?? null,
       applicant_id: resrc?.applicant_id || null,
       received_at: new Date().toISOString(),
     };
 
     if (runId) {
-      webhookStore.set(runId, mapped);
+      webhookStore.set(runId, {
+        ...mapped,
+        raw_output: output,
+        raw_payload: payload,
+    });
       console.log("✅ Webhook primit:", runId, "status:", mapped.status);
+      console.log("ℹ️ Webhook output:", JSON.stringify(output, null, 2));
     } else {
       console.log("⚠️ Webhook fără run id");
     }
 
-    // Onfido așteaptă 200 rapid
     res.status(200).send("ok");
   } catch (err) {
     console.error("❌ Eroare webhook:", err);
-    // trimitem tot 200 ca să nu reîncerce agresiv
     res.status(200).send("ok");
   }
 });
 
-// Debug: vezi ce a ajuns în webhook
 app.get("/api/webhook_runs/:id", (req, res) => {
   const data = webhookStore.get(req.params.id);
   if (!data) return res.status(404).json({ message: "not found" });
   res.json(data);
 });
 
-/* ============================
-   API JSON normal
-   ============================ */
 app.use(express.json({ limit: "2mb" }));
 
 async function onfidoFetch(pathname, opts = {}) {
@@ -156,7 +135,6 @@ async function onfidoFetch(pathname, opts = {}) {
   return json;
 }
 
-// creează applicant
 app.post("/api/applicants", async (req, res) => {
   try {
     const applicant = await onfidoFetch(`/applicants`, {
@@ -169,7 +147,6 @@ app.post("/api/applicants", async (req, res) => {
   }
 });
 
-// creează workflow_run (returnează și sdk_token)
 app.post("/api/workflow_runs", async (req, res) => {
   try {
     const run = await onfidoFetch(`/workflow_runs`, {
@@ -182,7 +159,6 @@ app.post("/api/workflow_runs", async (req, res) => {
   }
 });
 
-// ia statusul + output mapat pentru UI
 app.get("/api/workflow_runs/:id", async (req, res) => {
   try {
     const runId = req.params.id;
@@ -200,6 +176,8 @@ app.get("/api/workflow_runs/:id", async (req, res) => {
       date_of_birth: output?.dob ?? null,
       date_expiry: output?.date_expiry ?? null,
       gender: output?.gender ?? null,
+      first_name: output?.first_name ?? null,
+      last_name: output?.last_name ?? null,
       dashboard_url: run?.dashboard_url || null,
     });
   } catch (e) {
