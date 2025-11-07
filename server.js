@@ -118,8 +118,6 @@ async function onfidoFetch(pathname, opts = {}) {
 function formatAddressGeneric(addr) {
   if (!addr) return null;
   if (typeof addr === "string") return addr;
-
-  // Acceptăm ambele forme: line1/2/3 și flat/building/street
   const parts = [
     addr.flat_number,
     addr.building_number,
@@ -143,20 +141,30 @@ app.post("/api/applicants", async (req, res) => {
       last_name,
       email,
       country, // ISO3
-      town, // city
-      address, // un singur șir, îl punem în line1
+      town,    // city
+      address, // single line goes to line1
       state,
       postcode,
     } = req.body || {};
 
-    let addressPayload = null;
     const ctry = (country || "").toUpperCase().trim();
     const city = (town || "").trim();
     const line1 = (address || "").trim();
-    const st = (state || "").trim();
+    let st = (state || "").trim();
+
+    // ✅ for USA enforce 2-letter USPS
+    if (ctry === "USA") {
+      st = st.toUpperCase().slice(0, 2);
+      if (!/^[A-Z]{2}$/.test(st)) {
+        return res.status(400).json({ error: "State is required for US addresses (two-letter USPS code)." });
+      }
+    } else {
+      st = st || undefined; // optional elsewhere
+    }
+
+    let addressPayload = null;
     const pc = (postcode || "").trim();
 
-    // Trimitem adresa doar dacă avem țara și măcar oraș sau linia principală
     if (ctry.length === 3 && (city || line1)) {
       addressPayload = {
         country: ctry,
@@ -197,7 +205,7 @@ app.post("/api/workflow_runs", async (req, res) => {
   }
 });
 
-/* Citește applicant (util fallback) */
+/* Citește applicant (fallback util) */
 app.get("/api/applicants/:id", async (req, res) => {
   try {
     const id = req.params.id;
@@ -230,11 +238,9 @@ app.get("/api/workflow_runs/:id", async (req, res) => {
     let document_number = output?.document_number ?? null;
     let date_expiry = output?.date_expiry ?? null;
 
-    // address din output poate fi obiect (ca în exemplul tău) sau string
     let address_obj = typeof output?.address === "object" ? output.address : null;
     let address_str = typeof output?.address === "string" ? output.address : null;
 
-    // Fallback pe applicant dacă lipsesc nume/adresă
     if ((!first_name || !last_name || (!address_obj && !address_str)) && run?.applicant_id) {
       try {
         const applicant = await onfidoFetch(
@@ -270,8 +276,8 @@ app.get("/api/workflow_runs/:id", async (req, res) => {
       first_name: first_name ?? null,
       last_name: last_name ?? null,
       full_name: full_name || [first_name, last_name].filter(Boolean).join(" ") || null,
-      address: address_obj || address_str || null, // brut
-      address_formatted, // frumos de afișat
+      address: address_obj || address_str || null,
+      address_formatted,
       dashboard_url: run?.dashboard_url || null,
     });
   } catch (e) {
