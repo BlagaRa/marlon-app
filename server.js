@@ -22,6 +22,7 @@ if (!ONFIDO_API_TOKEN) {
 }
 
 /* Wide-open CORS for stateless public API */
+/* Wide-open CORS for stateless public API */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -30,14 +31,8 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
-// Optional explicit OPTIONS handler for any path
-app.options("*", (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Max-Age", "3600");
-  res.sendStatus(204);
-});
+
+
 
 /* Health */
 app.get("/healthz", (_req, res) => res.send("ok"));
